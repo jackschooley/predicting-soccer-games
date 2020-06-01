@@ -1,0 +1,1458 @@
+---
+title: "Predicting the Outcomes of Soccer Games"
+author: "Jack Schooley"
+output:
+     bookdown::pdf_document2:
+        number_sections: true
+        toc: false
+        #link-citations: true
+        #linkcolor: blue
+        latex_engine: xelatex
+fontsize: 12pt
+bibliography: references.bib
+abstract:  | 
+    The outcomes of soccer games can be massively important to soccer  fans and bettors alike. To predict the outcomes of these games, we consider the English Premier League (EPL) dataset from Kaggle,	which has data from the 2006/2007 through the 2017/2018	seasons. The main predictive model used was an ordinal logistic	regression model, and its predictive ability was compared against	simple logistic regression models for each of the three possible	outcomes of soccer matches. Variable selection for all models was	done using separate lasso fits, which selected the features for	each model using shrinkage. Finally, the resulting probabilities	generated from the ordinal logistic model were compared against	the implicit probabilities of the published Bet365 odds for each	game prior to kickoff. Afterwards, we then formulated our own	betting strategy using our model. We chose optimal  bets to make	from a probabilistic perspective and created a custom wager	function to determine the  monetary size of these bets. After	running several simulations on past data to optimize for a	threshold parameter, we then applied our model and betting	strategy in a real-time experiment using  real money over the	course of 4 months. Starting with an initial budget of $200, we	were able to  earn a slight profit with a final balance of $223.40	after making 79 bets. While this is not quite a large enough	sample size to judge the significance of our results, we view them	quite positively,  especially in the context of the current state	of literature regarding sports betting using  statistical learning	techniques. 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+Soccer is the world's most popular sport, and there is enormous interest in the outcomes of games. 
+In this paper, we try to make predictions about EPL soccer games using statistical learning 
+methodology. There are many quality papers that look at predicting outcomes of several different 
+sports, but one that is especially relevant to our interests is @baboota2019predictive, which has an
+exhaustive review of literature and a thorough attempt of applying machine learning to soccer games.
+This paper concluded that features are the limiting factor in predicting games. Another interesting 
+paper is @marek2019application, where the authors note a difficulty in predicting draws. The high 
+probability of a draw means that soccer is unlike most sports when it comes to predicting outcomes, 
+as standard two-case classification methods must be extended to accommodate three outcomes. 
+
+For all of the papers published along the lines of this subject, though, the vast majority stop at 
+predicting the outcomes of games and do not venture into betting territory. However, there is some 
+literature on the subject, and luckily @hubavcek2019exploiting summarizes the advances in this field
+quite well. That is to say, there is quite little significant work on the topic. The only paper that
+we are aware of that creates a profitable strategy for long-term betting is @kaunitz2017beating; 
+these people essentially pit the sportsbooks against each other by taking advantage of odds that 
+were better at one book as compared to the whole. While this paper shows that profiting is possible,
+they did not use a statistical model for the outcomes of games to choose their bets, which is what
+we will do in this paper.
+
+There are a couple main reasons for the lack of known profitable models, foremost among them being 
+the fact that profiting in the long-term is quite difficult. It's relatively common wisdom in the 
+sports betting community that at least 99% of bettors are not long-term winners. That being said, 
+the existence of professional sports bettors proves that it is possible to profit long-term. This 
+brings us to what we believe is the second main reason why there is no literature showing sustained 
+profits, and that is because there is a clear economic incentive to keep successful methods to 
+yourself. If someone comes up with a successful method, then they can either use it to make money 
+for themselves, or they can share it with the world and potentially lose their competitive advantage
+in the market.
+
+The model of choice for our purposes was an ordinal logistic regression model. This method will 
+generate probabilities for each of the three outcomes of soccer games. This model turns out to be 
+relatively effective; to show this, we compare model efficacy against simple logistic regression 
+models for each outcome using ROC curves. For example, a model classifying home win against all 
+other outcomes (away win and draw) will be compared to the home win probability generated by the 
+ordinal model, and so on for the other two outcomes. Next, we can also compare the probabilities 
+generated by the ordinal logistic regression model to the implied probabilities of betting odds. 
+Betting odds are perhaps the most accurate predictors of the results of games, so they can serve as 
+an effective way of checking the accuracy of the model. Assuming that betting odds approach the true
+probabilities of each outcome, then the closer our model is to them, the better.
+
+After our classification model is finished, we can consider how we can use our model to make 
+strategic and effective bets. To do this, we will run simulations on past games to develop a betting
+strategy, including the development of functions to determine which outcome to bet on for each game
+(if any) and the amount wagered. When doing this, we will examine the Kelly criterion 
+[@kelly2011new] and its limitations [@chu2018modified]. Finally, after running several simulations 
+on past results, we will run an experiment with our model on current games as they happen; this is 
+the only true test of how well our model performs in a betting context.
+
+# Data
+
+The input data used to train the model comes from a Kaggle dataset, which itself is data scraped 
+from the official website of the Premier League [@premierleague]. The data consists of stats from 
+the 2006/2007 through the 2017/2018 season, and it is pretty wide-ranging in terms of what is 
+tracked, from basic things like goals and shots to pretty in-depth things like total passes and 
+touches. However, this data is only available on a per-team, per-season basis. The data is not on a 
+per-game basis, which was not a concern at first, but later we will discuss why this causes a lot of
+bias when running betting simulations on past results. This Kaggle dataset also contains the results
+of every game from the aforementioned seasons.
+
+Our other data source is Football-Data, which we use mainly for historical betting odds data 
+[@footballdata]. This dataset has historical odds from a variety of different sportsbooks, but we 
+will only consider the odds from Bet365; this choice was made largely based on completeness of the 
+data across all of the seasons considered. This dataset also contains a few basic statistics for 
+each match, such as goals, fouls, and yellow cards; while it is much more limited in scope than our 
+Kaggle dataset, we will nonetheless be making use of these statistics in our final simulation.
+
+# The Model
+
+## Feature Construction and Selection
+
+We did some transformation to the original Kaggle dataset before training the model. Specifically, 
+we transformed the main statistical data to a input vector for each game; each game has two main 
+"groups" of features that comprise the total feature set. Firstly, the "level" features (denoted 
+with an $l$ subscript) are just the home team's stats (denoted with an $h$ subscript) for the season
+in which the game was played. Thus, for any feature $x$ in the feature set,
+$$x_l = x_h.$$
+
+The level features are mainly used to contrast with the "difference" features (denoted with a $d$ 
+subscript), which are constructed by subtracting the away team's stats (denoted with an $a$ 
+subscript) from the home team's stats for the season in which the game was played. Thus, for any 
+feature $x$ in the feature set, 
+$$x_d = x_h - x_a.$$
+
+For every response $y_i$, which is the outcome of game $i$, our input vector for this game $x_i$
+is comprised of the level and difference features together. To give a concrete example, consider a 
+match where Manchester United hosted Liverpool on September 12, 2015, which United won 3-1. In the 
+2015/2016 season, Manchester United scored 49 goals, whereas Liverpool scored 63; thus, the level 
+feature for goals would have a value of 49, whereas the difference feature for goals would have a 
+value of -14.
+
+After we construct the total feature set, we must now perform some feature selection, as our input 
+dataset has 62 potential features with some correlation between them. To do this, we used the lasso 
+loss function
+$$\sum_i (y_i - \alpha - \sum_j \beta_j x_{ij}) ^ 2 + \lambda \sum_j |\beta_j|$$
+to yield a sparse set of coefficients $\boldsymbol{\hat{\beta}}$ by letting the quantity 
+$\lambda \sum_j |\beta_j|$ set some of the coefficients to 0 [@tibshirani1996regression]. As 
+$\lambda$ increases, the coefficients will shrink closer to 0, and more coefficients will shrink to 
+exactly 0, yielding a sparser model. Selection for an optimal $\lambda$ regularization parameter was
+first done using 10-fold cross-validation, and the variables that were selected using this method 
+are shown in Table 1.
+
+```{r, echo = FALSE}
+o.m = matrix(c("Goals, difference", "Shots on target, difference", "Free kick goals, difference",
+               "Clean sheets, difference", "Goals conceded, difference", ""), ncol = 2, 
+             byrow = TRUE)
+knitr::kable(o.m, caption = 'Ordinal Logistic Regression Variables', format = "pandoc")
+```
+
+Using the features that the lasso selected, we then randomly separated our data into a training set 
+($n = 1000$) and a test set. We then trained our ordinal model, which is a proportional odds 
+logistic regression model, on the training set. This model is 
+$$\log (\frac{\gamma_j}{1 - \gamma_j}) = \zeta_j - \boldsymbol{\beta}^T \mathbf{x},$$
+where $\gamma_j = P(y \leq j)$, $\boldsymbol{\beta}$ is our coefficient vector, $\mathbf{x}$ is our 
+input vector, and $j \in {1, 2}$ (given that we have three outcomes) [@brant1990assessing]. We 
+obtain  coefficients $\beta_i$ for $i \in \{1, 2, ..., 5\}$ (as we now have $p = 5$ predictors) and 
+two intercepts $\zeta_1$ and $\zeta_2$. Then, for each game in the test set ($n = 3560$), we use the
+estimated values of $\gamma_j$ to compute the estimated probabilities of home wins, away wins, and 
+draws, which are henceforth denoted as $\hat{p}_h$, $\hat{p}_a$, and $\hat{p}_d$, respectively.
+
+## Comparison to Two-Outcome Classification
+
+Our first way of comparing model efficacy was to compare our ordinal logistic model against 
+individual simple logistic models for each of the three outcomes, given as
+$$\log (\frac{\pi}{1 - \pi}) = \alpha + \boldsymbol{\beta}^T \mathbf{x},$$
+where $\pi = P(y = j)$ (with $j$ corresponding to the positive outcome in the one vs. all scenario),
+$\alpha$ is the intercept term, $\boldsymbol{\beta}$ is the coefficient vector, and $\mathbf{x}$ is 
+the input vector [@peng2002introduction]. The same total feature set (with level and difference 
+variables) for the ordinal model was also used for the home win and away win simple logistic models.
+After the total feature set is constructed, we once again use separate lasso fits for feature 
+selection. The selected variables for the home win model are in Table 2, and the selected variables 
+for the away win model are in Table 3. Note that both level and difference features were selected in
+each of these models.
+
+```{r, echo = FALSE, }
+h.m = matrix(c("Goals, level", "Goals, difference", "Free kick goals, difference", 
+              "Inside box goals, difference", "Offsides, difference", "Goals conceded, difference",
+              "Touches, difference", ""), ncol = 2, byrow = TRUE)
+knitr::kable(h.m, caption = 'Home Win Simple Logistic Variables', format = "pandoc")
+```
+
+```{r, echo = FALSE}
+a.m = matrix(c("Header goals, level", "Penalty goals, level", "Outside box goals, level", 
+              "Counterattack goals, level", "Offsides, level", "Tackles, level", "Own goals, level",
+              "Long balls, level", "Corners, level", "High claims, level", "Goals, difference", 
+              "Shots on target, difference", "Header goals, difference", 
+              "Free kick goals, difference", "Outside box goals, difference", 
+              "Clean sheets, difference", "Goals conceded, difference", "Tackles, difference",
+              "Touches, difference", "Goal line clearances, difference"), ncol = 2, byrow = TRUE)
+knitr::kable(a.m, caption = 'Away Win Simple Logistic Variables', format = "pandoc")
+```
+
+There is a key difference in the feature set used for the draw simple logistic model in that the 
+absolute value of the difference variable is used in the total feature set, whereas this is not the 
+case for the other models. So, for the draw model only, for any feature $x$ in the feature set,
+$$x_d = |x_h - x_a|,$$
+where $x_d$ denotes the difference feature, and $x_h$ and $x_a$ denote the raw statistics for that 
+season for the home and away team, respectively. The reason for this is that when we are looking to 
+predict draws against all other outcomes, we are only concerned *if* one team is better than another
+in a given metric, not *which* team is better. Once again, we used a lasso model to select the 
+variables shown in Table 4.
+
+```{r, echo = FALSE}
+d.m = matrix(c("Inside box goals, level", "Counterattack goals, level", "Interceptions, level", 
+              "Tackles, level", "Goals, difference", "Penalty goals, difference",
+              "Counterattack goals, difference", "Clean sheets, difference",
+              "Goals conceded, difference", ""), ncol = 2, byrow = TRUE)
+knitr::kable(d.m, caption = 'Draw Simple Logistic Variables', format = "pandoc")
+```
+
+Now that we have simple logistic models to compare to our ordinal logistic model for each outcome, 
+we can construct ROC curves to measure the effectiveness of our ordinal model, as shown in Figure 1.
+We construct these ROC curves by taking the estimated probabilities of each outcome and comparing 
+them to the probability estimated by their respective simple logistic model. Then, by varying the 
+threshold at which we classify outcomes in a binary sense (one vs. all) based on their 
+probabilities, we can generate curves.
+
+```{r, echo = FALSE}
+suppressMessages(library(ordinalNet))
+suppressMessages(library(glmnet))
+suppressMessages(library(MASS))
+suppressMessages(library(ROCR))
+library(ggplot2)
+suppressWarnings(library(gridExtra))
+
+#import data
+master = read.csv("./data/stats.csv")
+results = read.csv("./data/results.csv")
+
+bets = read.csv("./data/2006_2007 Betting.csv")
+bets$season = "2006-2007"
+for (i in 2007:2017) {
+  title = paste("./data/", i, "_", i + 1, " Betting.csv", sep = "")
+  bets.temp = read.csv(title)
+  bets.temp$season = paste(i, "-", i + 1, sep = "")
+  bets = rbind(bets, bets.temp)
+}
+rm(bets.temp)
+
+#convert odds to probabilities
+bets$home.prob = 1 - ((bets$B365H - 1) / bets$B365H)
+bets$away.prob = 1 - ((bets$B365A - 1) / bets$B365A)
+bets$draw.prob = 1 - ((bets$B365D - 1) / bets$B365D)
+
+#create input data frame
+inputs = data.frame("home" = results$home_team, "away" = results$away_team,
+                    "season" = results$season, "result" = results$result, "h.goals" = NA,
+                    "h.yellows" = NA, "h.reds" = NA, "h.shots" = NA, "h.shots.on.target" = NA, 
+                    "h.hit.woodwork" = NA, "h.header.goals" = NA, "h.penalty.goals" = NA, 
+                    "h.free.kick.goals" = NA, "h.inside.box.goals" = NA, "h.outside.box.goals" = NA,
+                    "h.counterattack.goals" = NA, "h.offsides" = NA, "h.clean.sheets" = NA, 
+                    "h.goals.conceded" = NA, "h.saves" = NA, "h.blocks" = NA, 
+                    "h.interceptions" = NA, "h.tackles" = NA, "h.last.man.tackles" = NA,
+                    "h.clearances" = NA, "h.headed.clearances" = NA, "h.own.goals" = NA,
+                    "h.penalties.conceded" = NA, "h.penalty.goals.conceded" = NA, "h.passes" = NA, 
+                    "h.through.balls" = NA, "h.long.balls" = NA, "h.backwards.passes" = NA, 
+                    "h.crosses" = NA, "h.corners" = NA, "h.touches" = NA, 
+                    "h.big.chances.missed" = NA, "h.goal.line.clearances" = NA, 
+                    "h.dispossessed" = NA, "h.penalties.saved" = NA, "h.high.claims" = NA, 
+                    "h.punches" = NA, "d.goals" = NA, "d.yellows" = NA, "d.reds" = NA, 
+                    "d.shots" = NA, "d.shots.on.target" = NA, "d.hit.woodwork" = NA, 
+                    "d.header.goals" = NA, "d.penalty.goals" = NA, "d.free.kick.goals" = NA,
+                    "d.inside.box.goals" = NA, "d.outside.box.goals" = NA, 
+                    "d.counterattack.goals" = NA, "d.offsides" = NA, "d.clean.sheets" = NA, 
+                    "d.goals.conceded" = NA, "d.saves" = NA, "d.blocks" = NA,
+                    "d.interceptions" = NA, "d.tackles" = NA, "d.last.man.tackles" = NA,
+                    "d.clearances" = NA, "d.headed.clearances" = NA, "d.own.goals" = NA,
+                    "d.penalties.conceded" = NA, "d.penalty.goals.conceded" = NA,
+                    "d.passes" = NA, "d.through.balls" = NA, "d.long.balls" = NA,
+                    "d.backwards.passes" = NA, "d.crosses" = NA, "d.corners" = NA,
+                    "d.touches" = NA, "d.big.chances.missed" = NA, "d.goal.line.clearances" = NA, 
+                    "d.dispossessed" = NA, "d.penalties.saved" = NA, "d.high.claims" = NA, 
+                    "d.punches" = NA, "home.prob" = NA, "away.prob" = NA, "draw.prob" = NA)
+
+#generate two-team inputs from one-team inputs
+unnecessary.features = c(1:3, ncol(master))
+seasons = levels(inputs$season)
+h.start = 5
+h.stop = 42
+d.start = 43
+d.stop = 80
+for (game in 1:nrow(inputs)) {
+      home.team = inputs$home[game]
+      season =inputs$season[game]
+      home.stat = master[master$team == home.team & master$season == season, -unnecessary.features]
+      away.team = inputs$away[game]
+      away.stat = master[master$team == away.team & master$season == season, -unnecessary.features]
+      inputs[game, h.start:h.stop] = home.stat
+      inputs[game, d.start:d.stop] = home.stat - away.stat
+      inputs$home.prob[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "home.prob"]
+      inputs$away.prob[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "away.prob"]
+      inputs$draw.prob[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "draw.prob"]
+}
+
+#format data
+incomplete.vars = c("home", "away", "season", "h.saves", "h.headed.clearances", 
+                    "h.through.balls", "h.backwards.passes", "h.big.chances.missed", 
+                    "h.dispossessed", "d.saves", "d.headed.clearances", "d.through.balls", 
+                    "d.backwards.passes", "d.big.chances.missed", "d.dispossessed", "home.prob",
+                    "away.prob", "draw.prob")
+set.seed(12)
+train = sample(1:nrow(inputs), 1000)
+inputs.train = inputs[train, !names(inputs) %in% incomplete.vars]
+inputs.test = inputs[-train, !names(inputs) %in% incomplete.vars]
+
+#ordinal logistic model
+inputs.x = model.matrix(result ~ ., inputs.train)[ , -ncol(inputs.train)]
+lasso.cv = ordinalNetCV(inputs.x, inputs.train$result, alpha = 1, printProgress = FALSE)
+lambda = lasso.cv$lambdaVals[9]
+lasso = ordinalNet(inputs.x, inputs.train$result, 1, lambdaVals = lambda)
+
+ord.logit = polr(result ~ d.goals + d.shots.on.target + d.free.kick.goals + d.clean.sheets + 
+                   d.goals.conceded, inputs.train)
+fitted.probs = predict(ord.logit, inputs.test, "probs")
+
+#create separate into train/test for binary logistic models
+incomplete.vars = append(incomplete.vars, "result")
+
+win.data = inputs[, 4:ncol(inputs)]
+win.data$home.win[win.data$result == "H"] = 1
+win.data$home.win[win.data$result == "D" | win.data$result == "A"] = 0
+win.data = win.data[ , !names(win.data) %in% incomplete.vars]
+win.train = win.data[train, ]
+win.test = win.data[-train, ]
+
+lose.data = inputs[, 4:ncol(inputs)]
+lose.data$home.lose[lose.data$result == "A"] = 1
+lose.data$home.lose[lose.data$result == "D" | lose.data$result == "H"] = 0
+lose.data = lose.data[ , !names(lose.data) %in% incomplete.vars]
+lose.train = lose.data[train, ]
+lose.test = lose.data[-train, ]
+
+d.inputs = inputs
+d.inputs[, d.start:d.stop] = abs(d.inputs[, d.start:d.stop])
+draw.data = d.inputs[, 4:ncol(d.inputs)]
+draw.data$draw[draw.data$result == "D"] = 1
+draw.data$draw[draw.data$result == "H" | draw.data$result == "A"] = 0
+draw.data = draw.data[ , !names(draw.data) %in% incomplete.vars]
+draw.train = draw.data[train, ]
+draw.test = draw.data[-train, ]
+
+#create lasso models
+win.x = model.matrix(home.win ~ ., win.train)[ , -ncol(win.train)]
+win.cv = cv.glmnet(win.x, win.train$home.win, alpha = 1)
+win.lasso = glmnet(win.x, win.train$home.win, "binomial", alpha = 1)
+win.lasso.coef = predict(win.lasso, s = win.cv$lambda.min, type = "coefficients")
+
+lose.x = model.matrix(home.lose ~ ., lose.train)[ , -ncol(lose.train)]
+lose.cv = cv.glmnet(lose.x, lose.train$home.lose, alpha = 1)
+lose.lasso = glmnet(lose.x, lose.train$home.lose, "binomial", alpha = 1)
+lose.lasso.coef = predict(lose.lasso, s = lose.cv$lambda.min, type = "coefficients")
+
+draw.x = model.matrix(draw ~ ., draw.train)[ , -ncol(draw.train)]
+draw.cv = cv.glmnet(draw.x, draw.train$draw, alpha = 1)
+draw.lasso = glmnet(draw.x, draw.train$draw, "binomial", alpha = 1)
+draw.lasso.coef = predict(draw.lasso, s = draw.cv$lambda.min, type = "coefficients")
+
+#win logistic regression
+win.logit = glm(home.win ~ h.goals + d.goals + d.free.kick.goals + d.inside.box.goals + d.offsides +
+                  d.goals.conceded + d.touches, "binomial", win.train)
+win.logit.probs = predict(win.logit, win.test, "response")
+
+#loss logistic regression
+lose.logit = glm(home.lose ~ h.header.goals + h.penalty.goals + h.outside.box.goals + 
+                   h.counterattack.goals + h.offsides + h.tackles + h.own.goals + h.long.balls +
+                   h.corners + h.high.claims + d.goals + d.shots.on.target + d.header.goals +
+                   d.free.kick.goals + d.outside.box.goals + d.clean.sheets + d.goals.conceded + 
+                   d.tackles + d.touches + d.goal.line.clearances, "binomial", lose.train)
+lose.logit.probs = predict(lose.logit, lose.test, "response")
+
+#draw logistic regression
+draw.logit = glm(draw ~ h.inside.box.goals + h.counterattack.goals + h.interceptions + h.tackles +
+                   d.goals + d.penalty.goals + d.counterattack.goals + d.clean.sheets + 
+                   d.goals.conceded, "binomial", draw.train)
+draw.logit.probs = predict(draw.logit, draw.test, "response")
+
+#win roc curves
+win.fitted.probs = fitted.probs[, 3]
+win.roc.pred = prediction(win.fitted.probs, win.test$home.win)
+win.roc = performance(win.roc.pred, "tpr", "fpr")
+win.logit.roc.pred = prediction(win.logit.probs, win.test$home.win)
+win.logit.roc = performance(win.logit.roc.pred, "tpr", "fpr")
+
+#lose roc curves
+lose.fitted.probs = fitted.probs[, 1]
+lose.roc.pred = prediction(lose.fitted.probs, lose.test$home.lose)
+lose.roc = performance(lose.roc.pred, "tpr", "fpr")
+lose.logit.roc.pred = prediction(lose.logit.probs, lose.test$home.lose)
+lose.logit.roc = performance(lose.logit.roc.pred, "tpr", "fpr")
+
+#draw roc curves
+draw.fitted.probs = fitted.probs[, 2]
+draw.roc.pred = prediction(draw.fitted.probs, draw.test$draw)
+draw.roc = performance(draw.roc.pred, "tpr", "fpr")
+draw.logit.roc.pred = prediction(draw.logit.probs, draw.test$draw)
+draw.logit.roc = performance(draw.logit.roc.pred, "tpr", "fpr")
+```
+
+```{r, echo = FALSE, fig.cap = "ROC Curve Comparisons", fig.height = 3}
+par(mfrow = c(1, 3))
+
+plot(win.roc, col = "blue")
+plot(win.logit.roc, add = TRUE, col = "red")
+abline(0, 1, lty = 2)
+legend(0.5, 0.3, c("Ordinal", "Simple"), c("blue", "red"))
+title("Home Win")
+
+plot(lose.roc, col = "blue")
+plot(lose.logit.roc, add = TRUE, col = "red")
+abline(0, 1, lty = 2)
+legend(0.5, 0.3, c("Ordinal", "Simple"), c("blue", "red"))
+title("Away Win")
+
+plot(draw.roc, col = "blue")
+plot(draw.logit.roc, add = TRUE, col = "red")
+abline(0, 1, lty = 2)
+legend(0.5, 0.3, c("Ordinal", "Simple"), c("blue", "red"))
+title("Draw")
+```
+
+## Comparison to Betting Odds
+
+Finally, we can test our model efficacy by comparing it to betting odds. To do this, we must
+simply graph the probabilities $\hat{p}_h$, $\hat{p}_a$, and $\hat{p}_d$ generated by our model for 
+each game against the implied probabilities of betting odds, henceforth denoted as $p^*_h$, $p^*_a$,
+and $p^*_d$ for home wins, away wins, and draws, respectively. This is shown in Figure 2. We use the
+closing odds published by Bet365 just prior to kick off to represent the implied probabilities, and 
+the red lines are simply identity lines.
+
+```{r, echo = FALSE}
+#compare to bet365 betting
+win.probs = inputs$home.prob[-train]
+lose.probs = inputs$away.prob[-train]
+draw.probs = inputs$draw.prob[-train]
+```
+
+```{r, echo = FALSE, fig.cap = "Betting Odds Probability Comparison", fig.height = 3}
+hwpc = ggplot(mapping = aes(win.fitted.probs, win.probs)) + geom_point(col = "blue") + 
+  geom_abline(slope = 1, intercept = 0, col = "red", size = 1.5) + labs(title = "Home Win") +
+  labs(x = "Predicted Probability", y = "Betting Odds Implied Probability") + xlim(c(0, 1)) +
+  ylim(c(0, 1))
+
+awpc = ggplot(mapping = aes(lose.fitted.probs, lose.probs)) + geom_point(col = "blue") +
+  geom_abline(slope = 1, intercept = 0, col = "red", size = 1.5) + labs(title = "Away Win") +
+  labs(x = "Predicted Probability", y = "Betting Odds Implied Probability") + xlim(c(0, 1)) +
+  ylim(c(0, 1))
+
+dpc = ggplot(mapping = aes(draw.fitted.probs, draw.probs)) + geom_point(col = "blue") +
+  geom_abline(slope = 1, intercept = 0, col = "red", size = 1.5) + labs(title = "Draw") +
+  labs(x = "Predicted Probability", y = "Betting Odds Implied Probability") + xlim(c(0, 0.4)) +
+  ylim(c(0, 0.4))
+
+grid.arrange(hwpc, awpc, dpc, ncol = 3)
+```
+
+As you can see, the identity lines look to be pretty close to being legitimate best-fit lines. The
+probabilities generated by our ordinal model match up rather well to the implied probabilities of
+betting odds. However, there is a caveat to this in that bookmakers shade their lines to make events
+appear more likely than they actually are; that is, the implied probabilities will add up to 
+slightly greater than 1. This is the bookmaker's cut (also known as "juice" or "vig"), and it is the
+main reason why bookmakers make money. As far as our results go, though, this fact actually makes 
+them look even more favorable, as this would move the true implied probabilities (not counting the 
+bookmaker's cut) down on the graph, which would appear to move them even closer to our generated 
+probabilities.
+
+Now, while our model appears to approximate betting odds very well, we will shift our concern to 
+where our generated probabilities significantly differ from the implied probabilities of betting 
+odds. If we were to bet on these games, in general we would want to bet on the outcomes which are to
+the right of the red line on the graphs. That is, we want to bet on outcomes where the probability 
+generated by our model is greater than the implied probability of the betting odds. In the 
+long-term, this means that we will generate profit by getting rewarded at a rate which is higher 
+than one would expect for a given payout. This idea will form the basis of our betting strategy, 
+although there are many other things to consider.
+
+# Betting
+
+## Selecting Optimal Outcomes for Betting
+
+The gist of our betting strategy is that we want to bet on events that our model thinks are more 
+likely than their odds in betting markets imply. To start with, we use our model to compute the 
+probability of each event, which are denoted as $\hat{p}_h$, $\hat{p}_a$, and $\hat{p}_d$
+for home wins, away wins, and draws, respectively. Then we compare these probabilities to the 
+implied probabilities of betting odds, which are similarly denoted as $p^*_h$, $p^*_a$, 
+and $p^*_d$. Thus, for any outcome $j \in \{h, a, d\}$, we want to bet on outcomes such that 
+$\hat{p}_j > p^*_j$. These bets have a positive expected return, and we will show this using decimal
+odds.
+
+Not only are decimal odds the standard odds used in Europe (as opposed to fractional or American
+odds), they also are very convenient for calculation purposes. The return for any successful bet 
+made using $d$ dollars at decimal odds $o_j$ is $d (o_j - 1)$, and the implied probability of 
+decimal odds is simply their inverse (that is, $o_j = \frac{1}{p^*_j}$) Thus, for any bet made using
+$d$ dollars on an event with true probability ${p}_j$, our expected return $r_j$ is
+$$E[r_j] = d (\frac{p_j}{p^*_j} - 1).$$
+We know that $d > 0$, therefore the sign of the expectation depends strictly on $p_j$ and $p^*_j$. 
+If $p_j > p^*_j$, then $E[r_j] > 0$, and if $p_j < p^*_j$, then $E[r_j] < 0$. If $p_j = p^*_j$, then
+$E[r_j] = 0$ and these odds are fair. However, fairness is not really relevant to our concerns, as 
+bookmakers make money by offering explicitly unfair odds such that $\sum_j p^*_j > 1$.
+
+We will only consider a maximum of one bet on each game; while it is theoretically possible for two 
+of the three outcomes to be undervalued at the expense of a highly overvalued third outcome, we 
+assume competence on the part of the bookmaker to the degree that it is impossible to make multiple 
+positive expected return bets on mutually exclusive outcomes. We believe this assumption lines up 
+well with reality. In addition, we made the decision to not bet on draws altogether, as it is clear 
+that our model is relatively poor at selecting for them in comparison with home or away wins. Thus, 
+we only consider home win and away win outcomes when choosing bets. We do not show the results used 
+to justify this action here, as the simulations used to inform our decision were biased (which 
+we will address later). However, these simulations showed that not only did draws produce almost no 
+net profit, they also took profitability away from bets made on the other two outcomes.
+
+Another thing that we are forced to reconcile with is that our model probabilities are only 
+estimates. Thus, not all values $\hat{p}_j$ such that $\hat{p}_j > p^*_j$ will actually lead to 
+positive expected returns due to the error involved in estimation. Thus, we introduce a threshold 
+parameter, denoted as $\delta$, which is the minimum difference between $\hat{p}_j$ and $p^*_j$ that
+we will accept in order to make a bet. Formalized, we will only make a bet if
+$$\max(\hat{p}_h - p^*_h, \hat{p}_a - p^*_a) > \delta.$$
+Given this constraint, we can then select a bet on outcome $j$ such that
+$$\hat{p}_j - p^*_j = \max(\hat{p}_h - p^*_h, \hat{p}_a - p^*_a).$$
+As $\delta$ increases, we become more selective about our bets. Selectivity with bets is one of the 
+core ideas that make it possible to profit in sports betting, as bookmakers have to create lines for
+every outcome of every game, while bettors have the ability to pick and choose their bets in such a 
+way that exploits the bookmakers' inefficiencies. We will select an optimal $\delta$ after choosing 
+a wager function.
+
+## Selecting Optimal Wager Amounts
+
+There are two major parts to betting; while we have described our methodology for choosing which 
+outcomes to bet on, there is still the equally important task of determining how much money to wager
+for each bet. Luckily, the optimal wager amount for any bet is a question that has already been 
+answered by academics. The Kelly Criterion, developed by John L. Kelly, Jr., is a mathematical 
+formulation for the optimal wager amount [@kelly2011new]. The Kelly criterion $k(p_j)$ is a fraction
+of the bankroll that a bettor should wager on an event with decimal odds $o_j$ but with true 
+probability $p_j$ such that
+$$k(p_j) = \frac{p_j o_j - 1}{o_j - 1}.$$
+This formula is subject to our earlier constraint that $p_j > p^*_j$, as otherwise the optimal wager
+amount would be 0. As stated earlier, $k(p_j)$ will return a value between 0 and 1, and this is 
+merely the fraction of your bankroll that you should wager.
+
+While this criterion is a great starting point, there are some assumptions that it makes that do not
+apply to our methods. The most common argument against the Kelly criterion is that it favors risking
+too much money, as many sports betting enthusiasts recommend using a "half-Kelly" or some other
+fractional amount of the full criterion. A more rigorous line of reasoning for this idea is that 
+the criterion assumes that the true probability of the event is known, and this is not the case in 
+sports [@chu2018modified]. As previously mentioned, our model can only provide estimates of the 
+probabilities of events, so this would lead us to be more conservative in our wager amounts as 
+compared to the Kelly criterion.
+
+Another problem with applying the Kelly criterion to sports betting is that the criterion assumes 
+that only one bet occurs at a time, and we can always readjust our budget using the previous result 
+when making a new bet. In sports, this does not usually apply, as there are multiple games occurring
+simultaneously more often than not. This would also cause the Kelly criterion to select wagers that 
+might be riskier than we would like, as multiple bets in progress at the same time will distort our 
+budget for the criterion's purposes. In these situations, we will always err on the side of 
+caution, as sports betting is a long-term game, and we want to avoid ruin at all costs.
+
+Thus, using the Kelly criterion as a base, we made adjustments to develop our own custom wager 
+function. In our case, we wager a fraction of our bankroll $w(\hat{p_j})$ at decimal odds $o_j$ such
+that
+$$w(\hat{p_j}) = \min(0.1, k \frac{\min(0.1, \hat{p_j} - p^*_j) o_j}{o_j - 1}).$$
+We know that $p^*_j$ is the implied probability of $o_j$, and thus $p^*_j = \frac{1}{o_j}$. However,
+it is more convenient to think of the numerator as a function of the difference between estimated 
+and implied probabilities, thus we denote it as such. This change will produce a numerator value 
+that is less than the $p_j$ value that the Kelly criterion uses, so we multiply our quantity by 
+$o_j$ as opposed to $o_j - 1$ to compensate for this. In addition, our difference quantity is capped
+at 0.1, as we believe that any difference $p_j - p^*_j > 0.1$ is more likely to be poor estimation 
+on our part as opposed to the bookmakers'. It is circumstances like these where betting odds most 
+likely have information encoded in them that is hard to account for using a model, like an injury to
+a key player or a manager change. $k$ is a parameter that we will set to be between 0.1 and 1; $k=1$
+approximates the full Kelly amount $k(p_j)$, so we will most likely want to use something lower. 
+Finally, we also cap the entire quantity $w(\hat{p_j})$ at 0.1 so that we do not bet more than 10% 
+of our bankroll on a single outcome. This is actually a pretty high limit by sports betting 
+standards, as conventional community wisdom suggests a cap of around 5%.
+
+```{r, echo = FALSE}
+library(ordinalNet)
+library(glmnet)
+library(MASS)
+
+#import data
+master = read.csv("./data/stats.csv")
+results = read.csv("./data/results.csv")
+
+bets = read.csv("./data/2006_2007 Betting.csv")
+bets$season = "2006-2007"
+for (i in 2007:2017) {
+  title = paste("./data/", i, "_", i + 1, " Betting.csv", sep = "")
+  bets.temp = read.csv(title)
+  bets.temp$season = paste(i, "-", i + 1, sep = "")
+  bets = rbind(bets, bets.temp)
+}
+rm(bets.temp)
+
+#convert odds to probabilities
+bets$home.prob = 1 - ((bets$B365H - 1) / bets$B365H)
+bets$away.prob = 1 - ((bets$B365A - 1) / bets$B365A)
+bets$draw.prob = 1 - ((bets$B365D - 1) / bets$B365D)
+
+#create input data frame
+inputs = data.frame("home" = results$home_team, "away" = results$away_team,
+                    "season" = results$season, "result" = results$result, "h.goals" = NA,
+                    "h.yellows" = NA, "h.reds" = NA, "h.shots" = NA, "h.shots.on.target" = NA, 
+                    "h.hit.woodwork" = NA, "h.header.goals" = NA, "h.penalty.goals" = NA, 
+                    "h.free.kick.goals" = NA, "h.inside.box.goals" = NA, "h.outside.box.goals" = NA,
+                    "h.counterattack.goals" = NA, "h.offsides" = NA, "h.clean.sheets" = NA, 
+                    "h.goals.conceded" = NA, "h.saves" = NA, "h.blocks" = NA, 
+                    "h.interceptions" = NA, "h.tackles" = NA, "h.last.man.tackles" = NA,
+                    "h.clearances" = NA, "h.headed.clearances" = NA, "h.own.goals" = NA,
+                    "h.penalties.conceded" = NA, "h.penalty.goals.conceded" = NA, "h.passes" = NA, 
+                    "h.through.balls" = NA, "h.long.balls" = NA, "h.backwards.passes" = NA, 
+                    "h.crosses" = NA, "h.corners" = NA, "h.touches" = NA, 
+                    "h.big.chances.missed" = NA, "h.goal.line.clearances" = NA, 
+                    "h.dispossessed" = NA, "h.penalties.saved" = NA, "h.high.claims" = NA, 
+                    "h.punches" = NA, "d.goals" = NA, "d.yellows" = NA, "d.reds" = NA, 
+                    "d.shots" = NA, "d.shots.on.target" = NA, "d.hit.woodwork" = NA, 
+                    "d.header.goals" = NA, "d.penalty.goals" = NA, "d.free.kick.goals" = NA,
+                    "d.inside.box.goals" = NA, "d.outside.box.goals" = NA, 
+                    "d.counterattack.goals" = NA, "d.offsides" = NA, "d.clean.sheets" = NA, 
+                    "d.goals.conceded" = NA, "d.saves" = NA, "d.blocks" = NA,
+                    "d.interceptions" = NA, "d.tackles" = NA, "d.last.man.tackles" = NA,
+                    "d.clearances" = NA, "d.headed.clearances" = NA, "d.own.goals" = NA,
+                    "d.penalties.conceded" = NA, "d.penalty.goals.conceded" = NA,
+                    "d.passes" = NA, "d.through.balls" = NA, "d.long.balls" = NA,
+                    "d.backwards.passes" = NA, "d.crosses" = NA, "d.corners" = NA,
+                    "d.touches" = NA, "d.big.chances.missed" = NA, "d.goal.line.clearances" = NA, 
+                    "d.dispossessed" = NA, "d.penalties.saved" = NA, "d.high.claims" = NA, 
+                    "d.punches" = NA, "home.prob" = NA, "away.prob" = NA, "draw.prob" = NA,
+                    "home.return" = NA, "away.return" = NA, "draw.return" = NA)
+
+#generate two-team inputs from one-team inputs
+unnecessary.features = c(1:3, ncol(master))
+h.start = 5
+h.stop = 42
+d.start = 43
+d.stop = 80
+for (game in 1:nrow(inputs)) {
+      home.team = inputs$home[game]
+      season =inputs$season[game]
+      home.stat = master[master$team == home.team & master$season == season, -unnecessary.features]
+      away.team = inputs$away[game]
+      away.stat = master[master$team == away.team & master$season == season, -unnecessary.features]
+      inputs[game, h.start:h.stop] = home.stat
+      inputs[game, d.start:d.stop] = home.stat - away.stat
+      inputs$home.prob[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "home.prob"]
+      inputs$away.prob[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "away.prob"]
+      inputs$draw.prob[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "draw.prob"]
+      inputs$home.return[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "B365H"]
+      inputs$away.return[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "B365A"]
+      inputs$draw.return[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "B365D"]
+}
+
+#format data
+incomplete.vars = c("home", "away", "season", "h.saves", "h.headed.clearances", 
+                    "h.through.balls", "h.backwards.passes", "h.big.chances.missed", 
+                    "h.dispossessed", "d.saves", "d.headed.clearances", "d.through.balls", 
+                    "d.backwards.passes", "d.big.chances.missed", "d.dispossessed", "home.prob",
+                    "away.prob", "draw.prob", "home.return", "away.return", "draw.return")
+set.seed(12)
+train = sample(1:nrow(inputs), 1000)
+
+avgs = rep(0, 10)
+threshold = 0
+for (season in levels(inputs$season)) {
+  #inputs.train = inputs[train, !names(inputs) %in% incomplete.vars]
+  inputs.train = inputs[inputs$season != season, !names(inputs) %in% incomplete.vars]
+  #inputs.test = inputs[-train, !names(inputs) %in% incomplete.vars]
+  inputs.test = inputs[inputs$season == season, !names(inputs) %in% incomplete.vars]
+
+  #ordinal logistic model
+  #inputs.x = model.matrix(result ~ ., inputs.train)[ , -ncol(inputs.train)]
+  #lasso.cv = ordinalNetCV(inputs.x, inputs.train$result, alpha = 1)
+  #lambda = lasso.cv$lambdaVals[9] #use 12 for just simming latest season
+  #lasso = ordinalNet(inputs.x, inputs.train$result, 1, lambdaVals = lambda)
+
+  ord.logit = polr(result ~ d.goals + d.shots.on.target + d.free.kick.goals + d.clean.sheets + 
+                   d.goals.conceded, inputs.train)
+  fitted.probs = predict(ord.logit, inputs.test, "probs")
+  win.fitted.probs = fitted.probs[, 3]
+  lose.fitted.probs = fitted.probs[, 1]
+  draw.fitted.probs = fitted.probs[, 2]
+
+  #compare to bet365 betting
+  win.probs = inputs$home.prob[inputs$season == season]
+  lose.probs = inputs$away.prob[inputs$season == season]
+  draw.probs = inputs$draw.prob[inputs$season == season]
+
+  #win.probs = inputs$home.prob[-train]
+  #lose.probs = inputs$away.prob[-train]
+  #draw.probs = inputs$draw.prob[-train]
+
+  #create df for hypothetical bets
+  home.return = inputs$home.return[inputs$season == season] - 1
+  away.return = inputs$away.return[inputs$season == season] - 1
+  draw.return = inputs$draw.return[inputs$season == season] - 1
+  #home.return = inputs$home.return[-train] - 1
+  #away.return = inputs$away.return[-train] - 1
+  #draw.return = inputs$draw.return[-train] - 1
+  bets.hyp = data.frame("true.home.prob" = win.probs, "true.away.prob" = lose.probs, 
+                      "true.draw.prob" = draw.probs, "pred.home.prob" = win.fitted.probs,
+                      "pred.away.prob" = lose.fitted.probs, "pred.draw.prob" = draw.fitted.probs,
+                      "result" = inputs.test$result, home.return, away.return, draw.return)
+
+  #make hypothetical bets
+  bets.hyp$bet = NA
+  final.balances = c()
+  home.profits = c()
+  away.profits = c()
+  tot.games = c()
+  for (k in seq(0.1, 1, 0.1)) {
+    for (n in 1:nrow(bets.hyp)) {
+      home.edge = bets.hyp$pred.home.prob[n] - bets.hyp$true.home.prob[n]
+      away.edge = bets.hyp$pred.away.prob[n] - bets.hyp$true.away.prob[n]
+      draw.edge = bets.hyp$pred.draw.prob[n] - bets.hyp$true.draw.prob[n]
+      best.bet = max(home.edge, away.edge)
+      if (best.bet < threshold) {
+        bets.hyp$bet[n] = "N"
+      }
+      else if(best.bet == home.edge) {
+        bets.hyp$bet[n] = "H"
+      }
+      else if(best.bet == away.edge) {
+        bets.hyp$bet[n] = "A"
+      }
+    }
+    
+    wager = function(budget, edge, return) {
+      proportion = (min(0.1, edge) * (return + 1)) / return
+      change = proportion * k
+      bet = round(budget * change, 2)
+      return(bet)
+    }
+
+    #calculate returns
+    budget = 200
+    home.profit = 0
+    away.profit = 0
+    for (n in 1:nrow(bets.hyp)) {
+      if (bets.hyp$bet[n] == "H") {
+        home.edge = bets.hyp$pred.home.prob[n] - bets.hyp$true.home.prob[n]
+        home.return = bets.hyp$home.return[n]
+        bet = wager(budget, home.edge, home.return)
+        if(bets.hyp$result[n] == "H") {
+          return = bet * bets.hyp$home.return[n]
+          budget = budget + round(return, 2)
+          home.profit = home.profit + bet * bets.hyp$home.return[n]
+        }
+        else {
+          budget = budget - bet
+          home.profit = home.profit - bet
+        }
+      }
+      else if(bets.hyp$bet[n] == "A") {
+        away.edge = bets.hyp$pred.away.prob[n] - bets.hyp$true.away.prob[n]
+        away.return = bets.hyp$away.return[n]
+        bet = wager(budget, away.edge, away.return)
+        if (bets.hyp$result[n] == "A") {
+          return = bet * bets.hyp$away.return[n]
+          budget = budget + round(return, 2)
+          away.profit = away.profit + bet * bets.hyp$away.return[n]
+        }
+        else {
+          budget = budget - bet
+          away.profit = away.profit - bet
+        }
+      }
+    }
+  
+    final.balances = append(final.balances, budget)
+    home.profits = append(home.profits, home.profit)
+    away.profits = append(away.profits, away.profit)
+  
+    tab = table(bets.hyp$bet)
+    games = as.integer(tab[1] + tab[2])
+    tot.games = append(tot.games, games)
+  }
+  avgs = avgs + final.balances
+  vals = seq(0.1, 1, 0.1)
+  #plot(vals, final.balances)
+}
+
+k.avgs = avgs / length(levels(inputs$season))
+k = seq(0.1, 1, 0.1)
+
+library(ordinalNet)
+library(glmnet)
+library(MASS)
+
+#import data
+master = read.csv("./data/stats.csv")
+results = read.csv("./data/results.csv")
+
+bets = read.csv("./data/2006_2007 Betting.csv")
+bets$season = "2006-2007"
+for (i in 2007:2017) {
+  title = paste("./data/", i, "_", i + 1, " Betting.csv", sep = "")
+  bets.temp = read.csv(title)
+  bets.temp$season = paste(i, "-", i + 1, sep = "")
+  bets = rbind(bets, bets.temp)
+}
+rm(bets.temp)
+
+#convert odds to probabilities
+bets$home.prob = 1 - ((bets$B365H - 1) / bets$B365H)
+bets$away.prob = 1 - ((bets$B365A - 1) / bets$B365A)
+bets$draw.prob = 1 - ((bets$B365D - 1) / bets$B365D)
+
+#create input data frame
+inputs = data.frame("home" = results$home_team, "away" = results$away_team,
+                    "season" = results$season, "result" = results$result, "h.goals" = NA,
+                    "h.yellows" = NA, "h.reds" = NA, "h.shots" = NA, "h.shots.on.target" = NA, 
+                    "h.hit.woodwork" = NA, "h.header.goals" = NA, "h.penalty.goals" = NA, 
+                    "h.free.kick.goals" = NA, "h.inside.box.goals" = NA, "h.outside.box.goals" = NA,
+                    "h.counterattack.goals" = NA, "h.offsides" = NA, "h.clean.sheets" = NA, 
+                    "h.goals.conceded" = NA, "h.saves" = NA, "h.blocks" = NA, 
+                    "h.interceptions" = NA, "h.tackles" = NA, "h.last.man.tackles" = NA,
+                    "h.clearances" = NA, "h.headed.clearances" = NA, "h.own.goals" = NA,
+                    "h.penalties.conceded" = NA, "h.penalty.goals.conceded" = NA, "h.passes" = NA, 
+                    "h.through.balls" = NA, "h.long.balls" = NA, "h.backwards.passes" = NA, 
+                    "h.crosses" = NA, "h.corners" = NA, "h.touches" = NA, 
+                    "h.big.chances.missed" = NA, "h.goal.line.clearances" = NA, 
+                    "h.dispossessed" = NA, "h.penalties.saved" = NA, "h.high.claims" = NA, 
+                    "h.punches" = NA, "d.goals" = NA, "d.yellows" = NA, "d.reds" = NA, 
+                    "d.shots" = NA, "d.shots.on.target" = NA, "d.hit.woodwork" = NA, 
+                    "d.header.goals" = NA, "d.penalty.goals" = NA, "d.free.kick.goals" = NA,
+                    "d.inside.box.goals" = NA, "d.outside.box.goals" = NA, 
+                    "d.counterattack.goals" = NA, "d.offsides" = NA, "d.clean.sheets" = NA, 
+                    "d.goals.conceded" = NA, "d.saves" = NA, "d.blocks" = NA,
+                    "d.interceptions" = NA, "d.tackles" = NA, "d.last.man.tackles" = NA,
+                    "d.clearances" = NA, "d.headed.clearances" = NA, "d.own.goals" = NA,
+                    "d.penalties.conceded" = NA, "d.penalty.goals.conceded" = NA,
+                    "d.passes" = NA, "d.through.balls" = NA, "d.long.balls" = NA,
+                    "d.backwards.passes" = NA, "d.crosses" = NA, "d.corners" = NA,
+                    "d.touches" = NA, "d.big.chances.missed" = NA, "d.goal.line.clearances" = NA, 
+                    "d.dispossessed" = NA, "d.penalties.saved" = NA, "d.high.claims" = NA, 
+                    "d.punches" = NA, "home.prob" = NA, "away.prob" = NA, "draw.prob" = NA,
+                    "home.return" = NA, "away.return" = NA, "draw.return" = NA)
+
+#generate two-team inputs from one-team inputs
+unnecessary.features = c(1:3, ncol(master))
+h.start = 5
+h.stop = 42
+d.start = 43
+d.stop = 80
+for (game in 1:nrow(inputs)) {
+      home.team = inputs$home[game]
+      season =inputs$season[game]
+      home.stat = master[master$team == home.team & master$season == season, -unnecessary.features]
+      away.team = inputs$away[game]
+      away.stat = master[master$team == away.team & master$season == season, -unnecessary.features]
+      inputs[game, h.start:h.stop] = home.stat
+      inputs[game, d.start:d.stop] = home.stat - away.stat
+      inputs$home.prob[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "home.prob"]
+      inputs$away.prob[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "away.prob"]
+      inputs$draw.prob[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "draw.prob"]
+      inputs$home.return[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "B365H"]
+      inputs$away.return[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "B365A"]
+      inputs$draw.return[game] = bets[bets$HomeTeam == home.team & bets$AwayTeam == away.team & 
+                                      bets$season == season, "B365D"]
+}
+
+#format data
+incomplete.vars = c("home", "away", "season", "h.saves", "h.headed.clearances", 
+                    "h.through.balls", "h.backwards.passes", "h.big.chances.missed", 
+                    "h.dispossessed", "d.saves", "d.headed.clearances", "d.through.balls", 
+                    "d.backwards.passes", "d.big.chances.missed", "d.dispossessed", "home.prob",
+                    "away.prob", "draw.prob", "home.return", "away.return", "draw.return")
+set.seed(12)
+train = sample(1:nrow(inputs), 1000)
+
+wager = function(budget, edge, return) {
+  proportion = (min(0.1, edge) * (return + 1)) / return
+  change = min(0.1, proportion * 0.3)
+  bet = max(1, round(budget * change, 2))
+  return(bet)
+}
+
+avgs = rep(0, 101)
+for (season in levels(inputs$season)) {
+  #inputs.train = inputs[train, !names(inputs) %in% incomplete.vars]
+  inputs.train = inputs[inputs$season != season, !names(inputs) %in% incomplete.vars]
+  #inputs.test = inputs[-train, !names(inputs) %in% incomplete.vars]
+  inputs.test = inputs[inputs$season == season, !names(inputs) %in% incomplete.vars]
+
+  #ordinal logistic model
+  #inputs.x = model.matrix(result ~ ., inputs.train)[ , -ncol(inputs.train)]
+  #lasso.cv = ordinalNetCV(inputs.x, inputs.train$result, alpha = 1)
+  #lambda = lasso.cv$lambdaVals[9] #use 12 for just simming latest season
+  #lasso = ordinalNet(inputs.x, inputs.train$result, 1, lambdaVals = lambda)
+
+  ord.logit = polr(result ~ d.goals + d.shots.on.target + d.clean.sheets + 
+                   d.goals.conceded, inputs.train)
+  fitted.probs = predict(ord.logit, inputs.test, "probs")
+  win.fitted.probs = fitted.probs[, 3]
+  lose.fitted.probs = fitted.probs[, 1]
+  draw.fitted.probs = fitted.probs[, 2]
+
+  #compare to bet365 betting
+  win.probs = inputs$home.prob[inputs$season == season]
+  lose.probs = inputs$away.prob[inputs$season == season]
+  draw.probs = inputs$draw.prob[inputs$season == season]
+
+  #win.probs = inputs$home.prob[-train]
+  #lose.probs = inputs$away.prob[-train]
+  #draw.probs = inputs$draw.prob[-train]
+
+  #create df for hypothetical bets
+  home.return = inputs$home.return[inputs$season == season] - 1
+  away.return = inputs$away.return[inputs$season == season] - 1
+  draw.return = inputs$draw.return[inputs$season == season] - 1
+  #home.return = inputs$home.return[-train] - 1
+  #away.return = inputs$away.return[-train] - 1
+  #draw.return = inputs$draw.return[-train] - 1
+  bets.hyp = data.frame("true.home.prob" = win.probs, "true.away.prob" = lose.probs, 
+                      "true.draw.prob" = draw.probs, "pred.home.prob" = win.fitted.probs,
+                      "pred.away.prob" = lose.fitted.probs, "pred.draw.prob" = draw.fitted.probs,
+                      "result" = inputs.test$result, home.return, away.return, draw.return)
+
+  #make hypothetical bets
+  bets.hyp$bet = NA
+  final.balances = c()
+  home.profits = c()
+  away.profits = c()
+  tot.games = c()
+  for (threshold in seq(0, 0.1, by = 0.001)) {
+    for (n in 1:nrow(bets.hyp)) {
+      home.edge = bets.hyp$pred.home.prob[n] - bets.hyp$true.home.prob[n]
+      away.edge = bets.hyp$pred.away.prob[n] - bets.hyp$true.away.prob[n]
+      draw.edge = bets.hyp$pred.draw.prob[n] - bets.hyp$true.draw.prob[n]
+      best.bet = max(home.edge, away.edge)
+      if (best.bet < threshold) {
+        bets.hyp$bet[n] = "N"
+      }
+      else if(best.bet == home.edge) {
+        bets.hyp$bet[n] = "H"
+      }
+      else if(best.bet == away.edge) {
+        bets.hyp$bet[n] = "A"
+      }
+    }
+
+    #calculate returns
+    budget = 1000
+    home.profit = 0
+    away.profit = 0
+    for (n in 1:nrow(bets.hyp)) {
+      if (bets.hyp$bet[n] == "H") {
+        home.edge = bets.hyp$pred.home.prob[n] - bets.hyp$true.home.prob[n]
+        home.return = bets.hyp$home.return[n]
+        bet = wager(budget, home.edge, home.return)
+        if(bets.hyp$result[n] == "H") {
+          return = bet * bets.hyp$home.return[n]
+          budget = budget + round(return, 2)
+          home.profit = home.profit + bet * bets.hyp$home.return[n]
+        }
+        else {
+          budget = budget - bet
+          home.profit = home.profit - bet
+        }
+      }
+      else if(bets.hyp$bet[n] == "A") {
+        away.edge = bets.hyp$pred.away.prob[n] - bets.hyp$true.away.prob[n]
+        away.return = bets.hyp$away.return[n]
+        bet = wager(budget, away.edge, away.return)
+        if (bets.hyp$result[n] == "A") {
+          return = bet * bets.hyp$away.return[n]
+          budget = budget + round(return, 2)
+          away.profit = away.profit + bet * bets.hyp$away.return[n]
+        }
+        else {
+          budget = budget - bet
+          away.profit = away.profit - bet
+        }
+      }
+    }
+  
+    final.balances = append(final.balances, budget)
+    home.profits = append(home.profits, home.profit)
+    away.profits = append(away.profits, away.profit)
+  
+    tab = table(bets.hyp$bet)
+    games = as.integer(tab[1] + tab[2])
+    tot.games = append(tot.games, games)
+  }
+  avgs = avgs + final.balances
+}
+
+delta.avgs = avgs / length(levels(inputs$season))
+thresholds = seq(0, 0.1, 0.001)
+```
+
+```{r, echo = FALSE, fig.cap = "Selecting for k (top) and delta (bottom)", fig.height = 8.5}
+par(mfrow = c(2, 1))
+plot(k, k.avgs, ylab = "Average Final Balance")
+plot(thresholds, delta.avgs, xlab = "delta", ylab = "Average Final Balance")
+```
+
+Figure 3 shows a graph of final balance as a function of $k$. We computed these final balances by 
+running simulations on past data, in which for each season, we trained a model using data from all 
+other available seasons, and then we made hypothetical bets using the closing odds for each game. 
+The starting balance for the hypothetical bets is $200, and the balance is adjusted after each bet
+until the season ends. The final balances for each of the 11 seasons are then averaged and plotted 
+as a function of $k$, which is shown as follows. As you can see, the final balance is highest when 
+$k = 1$, but this simulation did not match real conditions with regards to multiple games going on 
+at a time. Thus, tweaking $k$ is more of a product of intuition as opposed to optimization. We 
+chose to use $k = 0.3$ for future simulations and experiments because on average there are around 3 
+games occurring simultaneously. This value also allows us to be pretty conservative with our 
+bankroll, which is desirable in a long-term game like sports betting.
+
+Now that we have a wager function, though, we can optimize for the threshold parameter $\delta$. 
+Using a $k$ value of 0.3, we constructed a simulation in the same manner as the previous one, 
+plotting final balances as a function of $\delta$.
+
+As also seen in Figure 3, it appears that the optimal $\delta$ is at about 0.025. As you go from 
+left to right, you are betting on fewer games, and so there is more variance involved. You might 
+think that as we increase our threshold, we are only removing the bets that the model is less 
+confident in, thus we should have higher expected returns. This would be true if not for the fact 
+that we are dealing with probabilistic events, and so a small number of bets leaves us vulnerable to
+a high amount of variance. Thus, it makes more sense that the optimal point is at a moderate value 
+that is nonzero yet not especially high.
+
+The y-axis for both this plot and the previous one is reflective of average final balance after a 
+full season when starting with an initial budget of $200. You might think that these values, which 
+offer enormous returns, are way too good to be true, and you would be correct. Up until this point, 
+every point of analysis and simulation has been done with biased data. Because the data that we have
+is only on a season-by-season basis and not a game-by-game basis, there is already implicit
+information about the results of games in the input data. There are 38 games in a season, so 1 game 
+out of 38 might contribute only a few percentage points to the whole, but this is still essentially 
+using the future to predict the past. The betting odds are reflective of their time, and we know 
+more about a team by virtue of its full-season performance than we could have if we were actually 
+betting on these games in the past. Thus, analysis of this past data would not translate well at all
+to betting on current games.
+
+## Revised Simulation
+
+At this point, it is then important that we should construct a simulation that more closely 
+resembles a method that we can use to bet on current games. There are a number of key changes that 
+need to be made, the most important of which is our data source. The betting odds data that we use 
+also happens to have basic box score stats for each game like goals and shots on target, and it just
+so happens that our model largely uses only these variables, so we can proceed with this data 
+provided by Football-Data. The only difference in the features used for our ordinal logistic model 
+is that free kick goals will be dropped from the model, as our new dataset did not have this at all.
+Table 5 shows the remaining variables that we will use from now on.
+
+```{r, echo = FALSE}
+f.m = matrix(c("Goals, difference", "Shots on target, difference", "Clean sheets, difference",
+               "Goals conceded, difference"), ncol = 2, byrow = TRUE)
+knitr::kable(f.m, caption = 'Final Ordinal Logistic Variables', format = "pandoc")
+```
+
+Another question that has to be answered is how we should construct our test set. We chose to use an
+equally weighted combination of the previous season's data as well as the current season's data up 
+the point of when the game was played.  We felt that only one previous year was sufficient to judge 
+team quality, as the English Premier League is relatively stagnant in terms of each team's relative 
+performance. That is to say, the good teams and bad teams are pretty constant year in and year out. 
+The training set was just all the other seasons that we had data for prior to the start of data used
+for the test set. Mathematically, for any feature $x$ in the feature set corresponding to season 
+$i$, 
+\begin{equation}
+x = \frac{1}{2} x_i + \frac{1}{2} x_{i-1},
+\end{equation}
+where $x_i$ is an accumulated season statistic that increases as the season progresses, whereas 
+$x_{i-1}$ is static. Each of these are weighted equally, so as the current season's data accumulates
+as more games occur, the actual weight placed on the current season increases relative to the prior 
+season's. These team-level statistics $x$ were then used in difference calculations to calculate 
+$x_d$ for each of the difference features.
+
+The construction of the test set raises yet another complication, and that has to do with newly 
+promoted teams. Each year, the bottom 3 teams in the Premier League are relegated to the second 
+division, called the Championship. Likewise, the top 3 teams from the Championship (more 
+specifically, the top 2 teams and the promotion playoff winner) are promoted to the Premier League. 
+This means that the newly promoted teams for the season that we are trying to simulate will have no 
+data to use for the previous season, creating another issue. We chose to rectify this by assigning 
+each of the three teams the same full-season stats for this missing year, where each individual stat
+is assigned as the league average for that stat (denoted as $\bar{x_{i-1}}$) minus half a standard 
+deviation (denoted as $\sigma_{x_{i-1}}$), rounded down in all cases except goals conceded, which 
+was rounded up. These newly promoted teams are nearly always below average, and we feel that the way
+that we assigned these stats is fair. Thus, for newly promoted teams that do not have defined stats 
+for season $i-1$, all their previous season stats $x_{i-1}$ are calculated as
+\begin{equation}
+x_{i-1} = \bar{x_{i-1}} - \frac{\sigma_{x_{i-1}}}{2}.
+\end{equation}
+These values are then used in Equation (1) to calculate any feature $x$ for newly promoted 
+teams.
+
+Finally, we made a change in the calculation of subsequent budgets throughout the season, in that 
+the budget is only recalculated once per day at most. This aligns more with a realistic scenario in 
+which you make all your bets for a given day at one time and only reevaluate your budget once they 
+are all complete. This experimental design is now easily in line with what we can do to bet on 
+current games, and we can once again do a full-season simulation. Figure 4 shows the results with a 
+plot of final balances as a function of $\delta$ once again.
+
+```{r, echo = FALSE}
+library(MASS)
+
+master = read.csv("./data/stats.csv")
+odds = read.csv("./data/2018_2019 betting.csv")
+results = read.csv("./data/results.csv")
+
+vars = c("team", "goals", "ontarget_scoring_att", "clean_sheet", "goals_conceded")
+stats = master[master$season == "2017-2018", vars]
+input.vars = c("goals", "shots.on.target", "clean.sheets", "goals.conceded")
+names(stats)[2:5] = input.vars
+
+#create data for teams that weren't in the prem (mean - half a standard deviation)
+createStats = function(i) {
+  row = stats[, i]
+  if (i == 5) {
+    return(ceiling(mean(row) - sd(row) / 2))
+  } else {
+    return(floor(mean(row) - sd(row) / 2))
+  }
+}
+
+cardiff = c("Cardiff", createStats(2), createStats(3), createStats(4), createStats(5))
+fulham = c("Fulham", createStats(2), createStats(3), createStats(4), createStats(5))
+wolves = c("Wolves", createStats(2), createStats(3), createStats(4), createStats(5))
+for (team in list(cardiff, fulham, wolves)) {
+  stats = rbind(stats, team)
+}
+
+#delete the teams that aren't in the prem anymore and refactor
+relegated = c(17, 19, 20)
+stats = stats[-relegated, ]
+stats$team = factor(stats$team, levels = levels(odds$HomeTeam))
+
+#reconstruct the input data frame so it only has data available from that time
+inputs = data.frame("date" = odds$Date, "home" = odds$HomeTeam, "away" = odds$AwayTeam, 
+                    "home.odds" = odds$B365H, "away.odds" = odds$B365A, "draw.odds" = odds$B365D,
+                    "goals" = NA, "shots.on.target" = NA, "clean.sheets" = NA, 
+                    "goals.conceded" = NA)
+
+inputs$date = as.Date(inputs$date, format = "%d/%m/%Y")
+for (i in 1:nrow(inputs)) {
+  date = inputs$date[i]
+  home.team = inputs$home[i]
+  home.stats = rep(0, 4)
+  away.team = inputs$away[i]
+  away.stats = rep(0, 4)
+  for (j in 1:nrow(inputs)) {
+    if (date == inputs$date[j]) {
+      break
+    }
+    if (inputs$home[j] == home.team) {
+      home.stats[1] = home.stats[1] + odds$FTHG[j]
+      home.stats[2] = home.stats[2] + odds$HST[j]
+      if (odds$FTAG[j] == 0) {
+        home.stats[3] = home.stats[3] + 1
+      }
+      home.stats[4] = home.stats[4] + odds$FTAG[j]
+    }
+    else if (inputs$away[j] == home.team) {
+      home.stats[1] = home.stats[1] + odds$FTAG[j]
+      home.stats[2] = home.stats[2] + odds$AST[j]
+      if (odds$FTHG[j] == 0) {
+        home.stats[3] = home.stats[3] + 1
+      }
+      home.stats[4] = home.stats[4] + odds$FTHG[j]
+    }
+    if (inputs$home[j] == away.team) {
+      away.stats[1] = away.stats[1] + odds$FTHG[j]
+      away.stats[2] = away.stats[2] + odds$HST[j]
+      if (odds$FTAG[j] == 0) {
+        away.stats[3] = away.stats[3] + 1
+      }
+      away.stats[4] = away.stats[4] + odds$FTAG[j]
+    }
+    else if (inputs$away[j] == away.team) {
+      away.stats[1] = away.stats[1] + odds$FTAG[j]
+      away.stats[2] = away.stats[2] + odds$AST[j]
+      if (odds$FTHG[j] == 0) {
+        away.stats[3] = away.stats[3] + 1
+      }
+      away.stats[4] = away.stats[4] + odds$FTHG[j]
+    }
+  }
+  last.stats = as.numeric(unname(unlist(stats[stats$team == home.team, input.vars]))) - 
+               as.numeric(unname(unlist(stats[stats$team == away.team, input.vars])))
+  this.stats = home.stats - away.stats
+  if (date == "2018-08-10" | date == "2018-08-11" | date == "2018-08-12") {
+    inputs[i, input.vars] = last.stats
+  }
+  else {
+    inputs[i, input.vars] = (last.stats + this.stats) / 2
+  }
+}
+
+inputs$home.prob = 1 / inputs$home.odds
+inputs$away.prob = 1 / inputs$away.odds
+inputs$draw.prob = 1 / inputs$draw.odds
+
+#run the model using the training data from until 2016-17
+train.results = results[results$season != "2017-2018", ]
+train.stats = master[master$season != "2017-2018", append(vars, "season")]
+names(train.stats)[2:5] = input.vars
+train = data.frame("home" = train.results$home_team, "away" = train.results$away_team, 
+                   "season" = train.results$season, "result" = train.results$result, 
+                   "goals" = NA, "shots.on.target" = NA, "clean.sheets" = NA, "goals.conceded" = NA)
+
+for (game in 1:nrow(train)) {
+  home.team = train$home[game]
+  season = train$season[game]
+  home.stat = train.stats[train.stats$team == home.team & train.stats$season == season, input.vars]
+  away.team = train$away[game]
+  away.stat = train.stats[train.stats$team == away.team & train.stats$season == season, input.vars]
+  train[game, 5:ncol(train)] = home.stat - away.stat
+}
+
+#create ordinal logistic model
+unnecessary.vars = c("home", "away", "season")
+inputs.train = train[ , !names(train) %in% unnecessary.vars]
+ord.logit = polr(result ~ ., inputs.train)
+
+#simulate the betting results
+predicted.probs = predict(ord.logit, inputs, "probs")
+away.probs = predicted.probs[, 1]
+draw.probs = predicted.probs[, 2]
+home.probs = predicted.probs[, 3]
+
+bets = data.frame("date" = factor(inputs$date), "true.home.prob" = inputs$home.prob, 
+                  "true.away.prob" = inputs$away.prob, "true.draw.prob" = inputs$draw.prob, 
+                  "pred.home.prob" = home.probs, "pred.away.prob" = away.probs, 
+                  "pred.draw.prob" = draw.probs, "result" = odds$FTR)
+bets$home.return = inputs$home.odds - 1
+bets$away.return = inputs$away.odds - 1
+bets$draw.return = inputs$draw.odds - 1
+bets$bet = NA
+bets$wager = NA
+
+k = 1
+wager = function(budget, edge, return) {
+  proportion = (min(0.1, edge) * (return + 1)) / return
+  change = min(0.1, proportion * k)
+  bet = max(1, round(budget * change, 2))
+  return(bet)
+}
+
+budgets = c()
+thresholds = seq(0, 0.1, by = 0.001)
+for (threshold in thresholds) {
+  budget = 200
+  for (n in 1:nrow(bets)) {
+    home.edge = bets$pred.home.prob[n] - bets$true.home.prob[n]
+    away.edge = bets$pred.away.prob[n] - bets$true.away.prob[n]
+    draw.edge = bets$pred.draw.prob[n] - bets$true.draw.prob[n]
+    best.bet = max(home.edge, away.edge)
+    if (best.bet < threshold) {
+      bets$bet[n] = "N"
+    }
+    else if(best.bet == home.edge) {
+      bets$bet[n] = "H"
+    }
+    else if(best.bet == away.edge) {
+      bets$bet[n] = "A"
+    }
+  }
+  
+#check result of bet and alter budget
+  for (date in levels(bets$date)) {
+    games = bets[bets$date == date, ]
+    for (n in 1:nrow(games)) {
+      if (games$bet[n] == "H") {
+        home.edge = games$pred.home.prob[n] - games$true.home.prob[n]
+        games$wager[n] = wager(budget, home.edge, games$home.return[n])
+      }
+      else if (games$bet[n] == "A") {
+        away.edge = games$pred.away.prob[n] - games$true.away.prob[n]
+        games$wager[n] = wager(budget, away.edge, games$away.return[n])
+      }
+      else {
+        games$wager[n] = 0
+      }
+    }
+    bets[bets$date == date, ] = games
+  
+    for(n in 1:nrow(games)) {
+      if (games$bet[n] == games$result[n]) {
+        if (games$bet[n] == "H") {
+          budget = budget + games$home.return[n] * games$wager[n]
+        }
+        else {
+          budget = budget + games$away.return[n] * games$wager[n]
+        }
+      }
+      else if (games$bet[n] != "N") {
+        budget = budget - games$wager[n]
+      }
+    }
+  }
+  budgets = append(budgets, budget)
+}
+
+k = 0.3
+wager = function(budget, edge, return) {
+  proportion = (min(0.1, edge) * (return + 1)) / return
+  change = min(0.1, proportion * k)
+  bet = max(1, round(budget * change, 2))
+  return(bet)
+}
+
+budgets2 = c()
+thresholds = seq(0, 0.1, by = 0.001)
+for (threshold in thresholds) {
+  budget = 200
+  for (n in 1:nrow(bets)) {
+    home.edge = bets$pred.home.prob[n] - bets$true.home.prob[n]
+    away.edge = bets$pred.away.prob[n] - bets$true.away.prob[n]
+    draw.edge = bets$pred.draw.prob[n] - bets$true.draw.prob[n]
+    best.bet = max(home.edge, away.edge)
+    if (best.bet < threshold) {
+      bets$bet[n] = "N"
+    }
+    else if(best.bet == home.edge) {
+      bets$bet[n] = "H"
+    }
+    else if(best.bet == away.edge) {
+      bets$bet[n] = "A"
+    }
+  }
+  
+#check result of bet and alter budget
+  for (date in levels(bets$date)) {
+    games = bets[bets$date == date, ]
+    for (n in 1:nrow(games)) {
+      if (games$bet[n] == "H") {
+        home.edge = games$pred.home.prob[n] - games$true.home.prob[n]
+        games$wager[n] = wager(budget, home.edge, games$home.return[n])
+      }
+      else if (games$bet[n] == "A") {
+        away.edge = games$pred.away.prob[n] - games$true.away.prob[n]
+        games$wager[n] = wager(budget, away.edge, games$away.return[n])
+      }
+      else {
+        games$wager[n] = 0
+      }
+    }
+    bets[bets$date == date, ] = games
+  
+    for(n in 1:nrow(games)) {
+      if (games$bet[n] == games$result[n]) {
+        if (games$bet[n] == "H") {
+          budget = budget + games$home.return[n] * games$wager[n]
+        }
+        else {
+          budget = budget + games$away.return[n] * games$wager[n]
+        }
+      }
+      else if (games$bet[n] != "N") {
+        budget = budget - games$wager[n]
+      }
+    }
+  }
+  budgets2 = append(budgets2, budget)
+}
+```
+
+```{r, echo = FALSE, fig.cap = "Unbiased Simulation Results with k = 1 (top) and k = 0.3 (bottom)", fig.height=8.5}
+par(mfrow = c(2, 1))
+plot(thresholds, budgets, xlab = "delta", ylab = "Final Balance")
+plot(thresholds, budgets2, xlab = "delta", ylab = "Final Balance")
+```
+
+Two plots are included in Figure 4. The top plot is reflective of our wager function with $k = 1$, 
+and the bottom plot is reflective of our wager function with $k = 0.3$. This is evidence that a 
+fraction of the Kelly criterion is actually more optimal in sports betting than the full Kelly, as a
+$k$ value of 1 is when our wager function approximates the true Kelly criterion. We can clearly see 
+that a $k$ value of 0.3 outperforms the higher value, justifying our use of a custom wager function.
+
+The starting balance was again $200, and so this is much more in line with what we could expect with
+this model. There appears to be a very slight upward trend, but there is also a lot more variance as
+we progress further on the x axis. There are a lot of $\delta$ values with small or even decent 
+profits with $k = 0.3$, but there are also some values with money losses as well. As far as an 
+optimal $\delta$ goes, it's hard to say exactly from only these plots. We decided to stick with our 
+previously obtained value of 0.025 due to our previous results. The previous simulation might have 
+been biased, but 0.025 still seems to be as good a choice as any other.
+
+## Real-Time Betting Experiment
+
+Finally, after all of this tinkering, we were able to apply our model to current games with a true 
+betting experiment that lasted around 4 months, which is about half a season. We use the same 
+experimental design as the previous simulation with respect to our model, training set, test set, 
+and accounting for newly promoted teams. We took betting odds from the betting website BetOnline.ag 
+and fed them into the model for each day there were games, and made real bets on the website with a 
+starting balance of $200. Each week, we collected the most updated statistics from the
+official website of the Premier League, and these statistics served as the $x_i$ from Equation (2). 
+The results are shown in Figure 5.
+
+```{r, echo = FALSE}
+experiment = read.csv("./data/experiment.csv")
+experiment$Date = as.Date(experiment$Date, format = "%m/%d/%Y")
+
+dif = 40
+```
+
+```{r, echo = FALSE, fig.cap = "Betting Experiment Results"}
+ggplot(experiment) + geom_col(aes(Date, Number.of.Bets * dif, fill = "Number of Bets")) + 
+  geom_line(aes(Date, Balance, group = 1, color = "Balance"), size = 2) + 
+  scale_color_manual(name = "", values = c("Balance" = "blue")) +
+  scale_y_continuous(name = "Balance ($)", sec.axis = sec_axis(~ . / dif, name = "Number of Bets"),
+                     limits = c(0, 250)) +  scale_x_date(date_breaks = "1 month") +
+  theme(legend.position = "bottom", legend.title = element_blank())
+```
+
+In the end, we were able to finish with a final balance of $223.40 for a slight profit after making 
+79 bets. There were definitely ups and downs over the course of the experiment, and this should 
+provide evidence that sports betting requires large sample sizes to accurately evaluate performance.
+In fact, a sample size of 79 is still pretty small by sports betting standards, and ideally, we 
+would have at least a full season-long experiment to accurately judge our model. It might seem that 
+our model performed better as time went on, and this could make sense in theory as our model shifted
+more weight to the current season as more games were played, but again the sample sizes involved 
+here are too small to say anything meaningful regarding this uptake in performance.
+
+# Conclusion
+
+Starting from the efficacy of our model in a vacuum, we showed that our ordinal logistic regression 
+model was at least as good at prediction as three separate simple logistic regression models for 
+each of the three outcomes of soccer games. These classification models are relatively good at 
+predicting wins for either the home or away team, but they are relatively poor at predicting draws. 
+This result is consistent with previously established literature that states that draws are the most
+difficult outcome to predict.
+
+We compared the probabilities generated by our model to the implied probabilities of betting odds, 
+and the results were quite excellent. Betting odds are known to be highly accurate in modeling the 
+probabilities of sporting outcomes, meaning that our own generated probabilities are also pretty 
+accurate representations of the true probabilities. Our probabilities tended to be slightly less 
+than the implied probabilities on the whole, but this is actually a good thing. The implied 
+probabilities used for comparison did not have the bookmaker's cut taken out, so these probabilities
+were shaded to be slightly higher than what the bookmakers believe the actual probabilities to be.
+After all, these implied probabilities add up to slightly greater than 1, so this reflects well upon
+our model.
+
+However, going from "fitting the betting odds well on a graph" to "making money consistently" with 
+our model was quite a large leap. After running several simulations, we developed a betting strategy
+with optimal bet choices as well as a custom wager function for each bet. It was at this point that 
+we learned that our statistics left a lot to be desired in terms of timing detail, and thus many of 
+our simulations produced unrealistic results because our inputs were biased. Finally, we were able 
+to run a 4-month real betting experiment for which we were able to produce a slight profit after 79 
+bets, in which our bankroll increased from $200 to $223.40. While our sample size was still not 
+large enough to accurately conclude the efficacy of our betting strategy, we were able to produce a 
+slight profit in the medium-term, which might at least suggest that our model was better than random
+guessing. 
+
+While this is not a terribly amazing result, our results are not too bad given the state of the 
+literature regarding statistical learning methods specifically in a sports betting context. 
+Considering the fact that the final model largely only uses derivatives of the scores of games as 
+features, we think that there is a lot of promise in the general methodology described in this 
+paper. The derivations and theory from the sports betting domain is very useful in constructing a 
+model like this, and if we could improve the feature set, then we think that it could greatly 
+improve the results of our model in a prediction as well as a betting context. Once again, the main 
+statistics used in the model were quite basic, and we would argue that access to more detailed and 
+granular statistics is one of the main hurdles for this effort. The two main improvements that we 
+could make to the feature set are to include more game-by-game statistics as well as more advanced 
+metrics that rely on location-level data.
+
+Finally, even with a relatively accurate model for predicting results, there are many aspects to 
+sports betting that are nonscientific in nature. This means that a good model is not the end-all 
+be-all. It is extremely difficult to quantify the effects that a manager change, an injury to a star
+player, or other non-statistical factors might have on the result of a game. In addition, sports in 
+general have a huge amount of variance relative to other domains. Thus, it would appear that both a
+good statistical model as well as knowledge about betting strategy and sports in general are 
+necessary to succeed in this field. All in all, we believe that if nothing else, our results, 
+particularly in context with the current state of the literature, point to the difficulty of 
+profiting long-term in sports betting even with advanced statistical methodology.
+
+# References
